@@ -29,7 +29,7 @@ Desktop PCs stacked on a lab bench and wired to one network switch. One machine 
 
 | Front view | Rear view (cabling) |
 | :---: | :---: |
-| ![Cluster front view: two stacks of three desktop PCs with the head node monitor and keyboard](https://raw.githubusercontent.com/MeshanNawod/slurm_cluster/refs/heads/main/image/cluster-1.jpg) | ![Cluster rear view: blue Ethernet cables from each node to the switch, with power strips]([images/cluster-2.jpg](https://raw.githubusercontent.com/MeshanNawod/slurm_cluster/refs/heads/main/image/cluster-2.jpg)) |
+| ![Cluster front view: two stacks of three desktop PCs with the head node monitor and keyboard](https://raw.githubusercontent.com/MeshanNawod/slurm_cluster/refs/heads/main/image/cluster-1.jpg) | ![Cluster rear view: blue Ethernet cables from each node to the switch, with power strips](https://raw.githubusercontent.com/MeshanNawod/slurm_cluster/refs/heads/main/image/cluster-2.jpg) |
 
 ```mermaid
 flowchart LR
