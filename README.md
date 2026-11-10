@@ -1,490 +1,415 @@
-# Setting Up a Slurm Cluster: Complete Beginners Guide including Network SetUp
+# Slurm Cluster Setup Scripts
 
-> A practical, from-scratch guide to building a small Slurm cluster, including the mistakes I made along the way.
+Three Bash scripts that turn fresh Ubuntu machines into a working **Slurm** cluster: one head node plus any number of workers, with static networking, time sync, passwordless SSH, Munge authentication and shared NFS storage.
 
-I built the cluster as a Physics lab computational cluster and learned along the way. Email me at sahanprathibhawije@gmail.com for any problems. 
+Built for a Physics lab computational cluster. Every step prints a clear `[ OK ]` / `[WARN]` / `[FAIL]` message with a hint on how to fix it, and the scripts are safe to re-run.
+
+> Want to understand every step by hand first? See the original manual guide: [Setting Up a Slurm Cluster: Complete Beginners Guide](https://github.com/sahan-maker). These scripts automate that guide.
+
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Hardware and Network](#hardware-and-network)
-3. [Step 0: Prepare network](#step-0-prepare)
-4. [Step 1: Prepare All Nodes](#step-1-prepare-all-nodes)
-5. [Step 2: Shared Storage (NFS)](#step-2-shared-storage-nfs)
-6. [Step 3: Munge Authentication](#step-3-munge-authentication)
-7. [Step 4: Install and Configure Slurm](#step-4-install-and-configure-slurm)
-8. [Step 5: Start the Services](#step-5-start-the-services)
-9. [Step 6: Test the Cluster](#step-6-test-the-cluster)
-10. [Troubleshooting](#troubleshooting)
+1. [The Cluster](#the-cluster)
+2. [Repository Layout](#repository-layout)
+3. [Requirements](#requirements)
+4. [BIOS Setup: Boot Menu and Auto Power-On](#bios-setup-boot-menu-and-auto-power-on)
+5. [Cluster Setup Generator (optional)](#cluster-setup-generator-optional)
+6. [Step-by-Step Installation](#step-by-step-installation)
+7. [Script Reference](#script-reference)
+8. [Verify the Cluster](#verify-the-cluster)
+9. [Troubleshooting](#troubleshooting)
+10. [Credits and Contributing](#credits-and-contributing)
 
 ---
 
-## Overview
+## The Cluster
 
+Desktop PCs stacked on a lab bench and wired to one network switch. One machine is the **head node** (monitor and keyboard attached); the others are headless **workers**.
 
+| Front view | Rear view (cabling) |
+| :---: | :---: |
+| ![Cluster front view: two stacks of three desktop PCs with the head node monitor and keyboard](images/cluster-front.jpg) | ![Cluster rear view: blue Ethernet cables from each node to the switch, with power strips](images/cluster-rear.jpg) |
 
-**What you'll build:**
+```mermaid
+flowchart LR
+    Internet((Internet)) --- Switch[Network switch]
+    Switch --- Head["head<br/>slurmctld + NFS server"]
+    Switch --- N0["node0<br/>slurmd"]
+    Switch --- N1["node1<br/>slurmd"]
+    Switch --- N2["nodeN<br/>slurmd"]
+    Head -. "NFS: /mnt/shared" .- N0
+    Head -. "NFS: /mnt/shared" .- N1
+    Head -. "NFS: /mnt/shared" .- N2
+```
 
-- 1 head (control) node running `slurmctld`
-- N worker nodes running `slurmd`
-- A shared filesystem exported over NFS
-- Munge for authentication between nodes
-
-**Who this is for:** <!-- e.g. students, lab admins, hobbyists -->
+| Component | Runs on | Purpose |
+| :--- | :--- | :--- |
+| `slurmctld` | Head | Scheduler / controller |
+| `slurmd` | Workers | Runs the jobs |
+| Munge | All machines | Authentication (one shared key) |
+| NFS `/mnt/shared` | Head exports, workers mount | Shared storage for job scripts and output |
+| Chrony | All machines | Time sync (clock differences break Munge) |
 
 ---
 
-## Hardware and Network
+## Repository Layout
 
-| Role | Hostname | IP Address | OS | Notes |
-|------|----------|------------|----|-------|
-| Head | `head` | `10.x.x.x` | Ubuntu 22.04.5 LTS (GUI version) | Runs slurmctld, NFS server |
-| Worker | `node0` | `10.x.x.x` | Ubuntu 22.04.5 LTS Server version(No GUI) | |
-| Worker | `node1` | `10.x.x.x` | Ubuntu 22.04.5 LTS Server version(No GUI) | |
-| Worker | `node2` | `10.x.x.x` | Ubuntu 22.04.5 LTS Server version(No GUI) | |
+```
+.
+├── README.md
+├── Cluster Setup Generator.html   # optional: pre-fills the script questions
+├── scripts/
+│   ├── node-setup.sh              # run on every worker (first)
+│   ├── head-setup.sh              # run on the head
+│   └── slurm-setup.sh             # run on the head (last)
+└── images/
+    ├── cluster-front.jpg
+    └── cluster-rear.jpg
+```
 
-- **Subnet:** `10.x.x.0/24`
-- **Admin user:** `<username>`
-- **Slurm version:** `<version>`
+On the USB drive, put the three scripts in a folder named **`Slurm`** (the commands below use `/mnt/usb/Slurm/`).
 
-<img width="4000" height="3000" alt="175271" src="https://github.com/user-attachments/assets/b7927cc9-32a8-4237-b290-b44d02d4fac1" />
+---
 
+## Requirements
 
+- Ubuntu 22.04 LTS
+  - Head: Desktop (GUI) edition, so you can open the Slurm configurator in a browser
+  - Workers: Server edition (no GUI)
+- Head hostname must be exactly **`head`**; workers use a prefix and a number (`node0`, `node1`, ...)
+- **The same username and password on every machine** (script default: `elec_cluster`)
+- All machines connected to one network switch with internet access
+- A free static IP for the head and for every worker (ask your network admin)
+- A USB drive to carry the scripts to the machines
 
+---
 
+## BIOS Setup: Boot Menu and Auto Power-On
 
-## Step 0: Prepare
+Do this **once on every machine** (head and workers) before or right after installing Ubuntu. The cluster in the photos uses Dell desktops; menu names below are for Dell BIOS and can differ slightly between models and BIOS versions. Other brands have the same options under similar names.
 
-### 0.1 Install Ubuntu Jammy Jellyfish GUI version on head node 
+### 1. Boot menu (to boot from the USB installer)
 
-GUI version is pretty easy to setup.
-1. Download iso image
-2. Make a bootable drive using rufus
-3. Reboot and install using bootable drive
-4. Give same name to user on every computer including head. Like,
-> user: elec_cluster
-> 
-> pc_name: head
-> 
-> password: same on each machine
+1. Power on the PC and repeatedly tap **F12** (one-time boot menu on Dell).
+2. Choose your USB drive from the list and press Enter.
 
-   
+Other common keys: **F2** or **Del** opens the full BIOS setup; **Esc**, **F9**, **F10** or **F11** open the boot menu on other brands.
 
-### 0.2 Install Ubuntu Jammy Jellyfish Server version on worker nodes
+### 2. Power management: AC Recovery (power back on after a power cut)
 
-1. Download server iso image
-2. Make a bootable drive using rufus
-3. Reboot and install using bootable drive
-4. Uncheck lvm group when prompted during install
-5. Give same name to user but change pc names(node0, node1). Like,
-> user: elec_cluster
-> 
-> pc_name: node0
-> 
-> password: same on each machine
-6. Connect everything to network switch via ethernet cables
-7. Connect a network cable from wall internet to switch
-### 0.3 On Head node
-Change wired network to manual ip and give an ip address.
+By default most PCs stay off after the power is cut and restored. With **AC Recovery** set correctly, every PC starts by itself when the plug gets power again. This matters for a cluster that runs unattended.
 
-### 0.4 On Worker nodes
+1. Tap **F2** at startup to enter BIOS setup.
+2. Go to **Power Management** (called **Power** on some models).
+3. Find **AC Recovery** (also shown as *AC Power Recovery*, *Restore on AC Power Loss* or *After Power Loss*).
+4. Set it to **Power On**.
+
+   | Option | Behaviour |
+   | :--- | :--- |
+   | Power Off | Stays off when power returns (default on most machines) |
+   | **Power On** | **Starts automatically when power returns (use this)** |
+   | Last Power State | Returns to whatever it was doing before the cut |
+
+   *Last Power State* also works, but a machine that was switched off will then stay off. **Power On** is the safest choice for a cluster.
+5. Save and exit (**F10**, or **Apply Changes** then **Exit**).
+
+Optional settings in the same menu:
+
+- **AC Recovery Time** or **Auto On Time** (if your BIOS has it): add a small delay, or a different delay per machine, so all PCs do not draw their start-up current at the same moment.
+- **Deep Sleep Control**: leave it disabled if you want the PC to start reliably after power returns.
+- **Wake on LAN**: enable it if you also want to power machines on remotely over the network.
+
+### 3. Test it
+
+1. Shut the PC down, then unplug the power cable (or switch off the power strip).
+2. Wait about 10 seconds and plug it back in.
+3. The PC should power on by itself without pressing the power button.
+
+### After a power cut: what starts by itself
+
+- `slurmd` (workers) and `slurmctld` (head) are enabled by the setup scripts, so they start on boot.
+- The workers mount `head:/mnt/shared` with the `nofail` option. If a worker boots **before** the head is ready, the mount can fail at boot and the machine still starts normally. When the head is up, run this on the worker:
+
+  ```bash
+  sudo mount -a
+  ```
+
+  or simply reboot the worker.
+- If a node shows `down` or `unk*` in `sinfo` after the cluster is back, see [Troubleshooting](#troubleshooting).
+
+---
+
+## Cluster Setup Generator (optional)
+
+`Cluster Setup Generator.html` lets you type your cluster details **once** so the scripts do not ask you again. This reduces the interaction time during setup.
+
+### How to use it
+
+1. Open the page and enter these once:
+   - cluster user
+   - head IP
+   - node0 IP
+   - node name prefix
+   - first node index and how many nodes
+   - gateway and DNS (they are filled in for you and you can edit them)
+   - netmask bits
+2. Click **Download all 3 scripts (.zip)**, then run:
+
+   ```bash
+   unzip cluster-scripts.zip
+   ```
+
+   It is a zip because the page cannot download `.sh` files on their own. If the download is blocked, the page has a copy button for each script.
+3. Put the three scripts in the **`Slurm`** folder on your USB drive and continue with the [installation steps](#step-by-step-installation).
+
+### What each script still asks you (generated scripts)
+
+| Script | What it still asks |
+| :--- | :--- |
+| `node-setup.sh` (on each worker) | Only the node name, e.g. `node3`. Node IP, gateway, DNS and interface come from your values, and the final "Continue?" question is removed. |
+| `head-setup.sh` | Only the password. The "Continue?" question is removed. |
+| `slurm-setup.sh` | Only the password. |
+
+**Automatic updates:** the generated `node-setup.sh` turns off automatic updates on each worker. It disables and masks the `apt-daily` timers and `unattended-upgrades`, and writes `20auto-upgrades` with zeros.
+
+**Unchanged:** the generated scripts are the original scripts with the typed questions replaced by your values, so all checks and messages are the same. One question is kept on purpose: the duplicate-IP warning in `node-setup.sh`, because that needs a human decision.
+
+**Run order:** `node-setup.sh` on every worker, then `head-setup.sh`, then create `slurm.conf`, then `slurm-setup.sh`.
+
+> The scripts in `scripts/` are the original interactive versions and ask every question. Use the generator if you want fewer prompts.
+
+---
+
+## Step-by-Step Installation
+
+Run the steps **in this order**: all workers first, then the head, then `slurm.conf`, then `slurm-setup.sh`.
+
+### Part A: Set up every worker node (one by one)
+
+Do all of the following on **each worker**, then move to the next one.
+
+**1. Install the operating system**
+
+First set the BIOS options from [BIOS Setup](#bios-setup-boot-menu-and-auto-power-on) (boot menu key and **AC Recovery = Power On**). Then install Ubuntu Server 22.04 on the node. Use the same username and password as on every other machine, and give the node its own name (`node0`, `node1`, ...). Connect the node to the network switch with an Ethernet cable.
+
+**2. Plug in the USB drive and find it with `lsblk`**
 
 ```bash
-ip a
+lsblk
+```
 
-```
-This will show network state. Could be down. Note down the network interface name. Something like enp0s31f6 
-1. Bring the network state UP if down,
-```bash
-sudo ip link set enp0s31f6 up
-ip a
-```
-2. Tell cloud-init to stop managing network config.
-```bash
-sudo nano /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-```
-Add this content: 
-> network: {config: disabled}
->
-And save (ctrl+o to save then ctrl+x to exit)
-
-3. Now edit the netplan file with your actual config
- ```bash
-sudo nano /etc/netplan/50-cloud-init.yaml
-```
-(or whatever the filename is under /etc/netplan/ — use ls /etc/netplan/ to confirm)
-4. Replace the content with, using your own ip address, check network admin to figure out what to use instead of 10.20.52 and at the end add a free ip like 175 :
-```bash
-network:
-  version: 2
-  ethernets:
-    enp0s31f6:
-      dhcp4: no
-      addresses:
-        - 10.20.52.175/24
-      routes:
-        - to: default
-          via: 10.20.52.254
-      nameservers:
-        addresses: [10.20.2.1]
-```
-save and exit. 
-
-5. 
-> sudo netplan apply 
->
-and if netplan apply fails. install
->sudo apt update && sudo apt install openvswitch-switch
->
-6. Repeat on all nodes. Change ips like, 175,176,177
-7. Do "ip a" and confirm the ip address is static after reboots
-
-## Step 1: Prepare All Nodes
-
-### 1.1 Set up `/etc/hosts`
-1. On head node terminal
-```bash
-sudo nano /etc/hosts
-```
-2. edit following according to your ip setup
+Example output:
 
 ```text
-127.0.0.1 localhost
-127.0.1.1 head
-
-10.20.52.183 head
-10.20.52.175 node0
-10.20.52.176 node1
-10.20.52.177 node2
-
-```
-save and exit
-3. Install openssh
-```bash
-sudo apt update 
-sudo apt install openssh-server -y
-```
-4. Gotta copy the hosts file to worker nodes
-   
-   use the destination pc ip address
-```bash
-scp /etc/hosts elec_cluster@10.20.52.176:/tmp/hosts
-```
-5. SSH into that machine and then copy hosts from tmp to etc
-```bash
-ssh elec_cluster@10.20.52.176
-sudo cp /tmp/hosts /etc/hosts
-```
-6.Repeat this file copying for all nodes until each have an identical hosts file in their etc. But then edit all those files using nano since first two lines should read 127.0.0.1 localhost and 127.0.1.1 nodename. Nodename is it's own name since 1.1 is home. 
-
-7. Check whether you can now ssh and back into each node using just name. Replace elec_cluster with your on cluster/user name
-```bash
-ssh elec_cluster@node1
-ssh elec_cluster@head
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0  63.9M  1 loop /snap/core20/2318
+sda      8:0    0 238.5G  0 disk
+├─sda1   8:1    0     1G  0 part /boot/efi
+└─sda2   8:2    0 237.4G  0 part /
+sdb      8:16   1   7.3G  0 disk
+└─sdb1   8:17   1   7.3G  0 part
 ```
 
-### 1.2 Set up passwordless SSH
+How to pick the USB partition:
+
+- The USB drive is the disk with **`RM` = 1** (removable) and a size that matches your flash drive (here `sdb`, 7.3 GB).
+- Use its **partition** (`TYPE` = `part`) with no mount point yet, here **`sdb1`**.
+- Do **not** pick `sda`: that is the computer's own disk (it has `/` and `/boot/efi` mounted).
+
+Your USB may show up with a different name (for example `sdc1`). Use whatever `lsblk` shows for your drive.
+
+**3. Create a folder to mount it on**
 
 ```bash
-ssh-keygen -t ed25519
-ssh-copy-id elec_cluster@node0
-# repeat for each node
+sudo mkdir -p /mnt/usb
 ```
 
-### 1.3 Sync time
+**4. Mount the USB drive**
 
 ```bash
-sudo apt install -y chrony
-sudo systemctl enable --now chrony
+sudo mount /dev/sdb1 /mnt/usb
 ```
 
-### 1.4 Run commands on all nodes from head
+**5. Go to the scripts folder**
 
 ```bash
-for n in node0 node1 node2; do
-  ssh "$n" "hostname && uptime"
-done
+cd /mnt/usb/Slurm/
 ```
 
-<!-- Add anything that tripped you up here -->
+**6. Run the worker script**
+
+```bash
+sudo ./node-setup.sh
+```
+
+If you get `Permission denied` (some USB file systems do not keep the executable flag), run it this way instead:
+
+```bash
+sudo bash node-setup.sh
+```
+
+Answer the questions (with the generator you are only asked for the node name):
+
+| Prompt | Example |
+| :--- | :--- |
+| Head IP | `10.40.52.183` |
+| IP of node0 (first node) | `10.40.52.175` |
+| This node's name | `node8` |
+| Node IP | Press Enter to accept the calculated one |
+| Gateway / DNS | Press Enter to accept the guess (`x.x.x.254` / `x.x.2.1`) or type your own |
+| Network interface | Press Enter to accept the detected one |
+
+How the node IP is calculated: node0's IP plus the node number, skipping the head's IP. With head `.183` and node0 `.175`: node7 = `.182`, node8 = `.184`, node9 = `.185`.
+
+**7. Reboot and check**
+
+```bash
+sudo reboot
+# after it boots:
+ip a        # the static IP should still be there
+```
+
+**8. Repeat for every worker node** (steps 1 to 7).
 
 ---
 
-## Step 2: Shared Storage (NFS)
+### Part B: Set up the head node
 
-### 2.1 On the head node (server)
+Once **all** workers are done, go to the head node.
 
-```bash
-sudo apt install -y nfs-kernel-server
-sudo mkdir -p /mnt/shared
-sudo chown <user>:<user> /mnt/shared
-```
+**1.** Install Ubuntu 22.04 Desktop (GUI) on the head. Same username and password as the workers, hostname `head`.
 
-```text
-# /etc/exports
-/mnt/shared 10.x.x.0/24(rw,sync,no_subtree_check)
-```
+**2.** Plug in the USB drive and mount it the same way:
 
 ```bash
-sudo exportfs -ra
-sudo systemctl restart nfs-kernel-server
+lsblk
+sudo mkdir -p /mnt/usb
+sudo mount /dev/sdb1 /mnt/usb
+cd /mnt/usb/Slurm/
 ```
 
-### 2.2 On each worker node (client)
+**3.** Run the head script as your **normal user** (not root, not `sudo`):
 
 ```bash
-sudo apt install -y nfs-common
-sudo mkdir -p /mnt/shared
-sudo mount head:/mnt/shared /mnt/shared
+bash ./head-setup.sh
 ```
 
-Make it persistent:
+Enter your password when asked. (Without the generator it also asks: cluster user, head IP, node name prefix, first and last node index, and node0's IP.)
 
-```text
-sudo nano /etc/fstab #inside add text
-head:/mnt/shared  /mnt/shared  nfs  defaults,_netdev  0  0
-```
-
-### 2.3 Verify
-
-```bash
-df -h /mnt/shared
-touch /mnt/shared/test && ls -l /mnt/shared
-```
-
-
-## Step 3: Munge Authentication
-
-Munge must use the **same key** on every node, and UIDs/GIDs for `munge` must match.
-
-### 3.1 Install
-
-```bash
-sudo apt install -y munge libmunge-dev
-```
-
-### 3.2 Create the key on head and distribute it
-
-```bash
-sudo /usr/sbin/mungekey --create    # or: sudo create-munge-key
-sudo scp /etc/munge/munge.key <user>@node0:/tmp/munge.key
-# on node0:
-sudo mv /tmp/munge.key /etc/munge/munge.key
-sudo chown munge:munge /etc/munge/munge.key
-sudo chmod 400 /etc/munge/munge.key
-```
-
-### 3.3 Start and test
-
-```bash
-sudo systemctl enable --now munge
-munge -n | unmunge                  # local test
-munge -n | ssh node0 unmunge        # cross-node test
-```
-
-<!-- Common issue: clock skew or mismatched key -> "Rejected credential" -->
+For every worker it sets up passwordless SSH, Chrony, `/etc/hosts`, the Slurm packages, one shared Munge key (checked and tested in both directions), and NFS (`/mnt/shared` exported from the head and mounted on each worker). A summary table at the end shows which nodes are OK or FAILED. Fix any failed node and run the script again.
 
 ---
 
-## Step 4: Install and Configure Slurm
+### Part C: Create `slurm.conf`
 
-### 4.1 Install packages
-
-**Head node:**
+**1.** On the head, open the Slurm configurator in a web browser:
 
 ```bash
-sudo apt install -y slurm-wlm
+xdg-open /usr/share/doc/slurmctld/slurm-wlm-configurator.html
 ```
 
-**Worker nodes:**
+(or open `/usr/share/doc/slurmctld/slurm-wlm-configurator.html` from Firefox).
+
+**2.** On a worker, run `lscpu` to get the hardware values.
+
+**3.** Fill in only these fields:
+
+| Field | Value |
+| :--- | :--- |
+| ClusterName | Your cluster name |
+| SlurmctldHost | `head` |
+| NodeName | e.g. `node[0-7]` (must match your real node names) |
+| CPUs, Sockets, CoresPerSocket, ThreadsPerCore | From `lscpu` |
+| ProctrackType | `LinuxProc` |
+
+**4.** Click **Submit** and copy the text that appears.
+
+**5.** Paste it into the config file on the head:
 
 ```bash
-sudo apt install -y slurmd slurm-client
+sudo nano /etc/slurm/slurm.conf
 ```
 
-<!-- Or describe building from source if that's what you did -->
+Save with `Ctrl+O`, `Enter`, then exit with `Ctrl+X`.
 
-### 4.2 Create `slurm.conf` This is most important
+---
 
-Create on head, then copy the **identical** file to every node (or put it on the NFS share).
+### Part D: Start Slurm
 
-Use slurm's configuration file tool located at /usr/share/doc/slurmctld/slurm-wlm-configurator.html . Open the configurator file with your browser.
-
-Find the correct hardware values on a worker node using(after sshing into):
+**1.** Go back to the scripts folder on the head (if you are not already there):
 
 ```bash
-lscpu
+cd /mnt/usb/Slurm/
 ```
 
-Configure only following
-
-    ClusterName: <YOUR-CLUSTER-NAME>
-    SlurmctldHost: <CONTROLLER-NODE-NAME>
-    NodeName: <WORKER-NODE-NAME>[1-4] (this would mean that you have four worker nodes called <WORKER-NODE-NAME>1, <WORKER-NODE-NAME>2, <WORKER-NODE-NAME>3, <WORKER-NODE-NAME>4)
-    Enter values for CPUs, Sockets, CoresPerSocket, and ThreadsPerCore according to $ lscpu (run on a worker node computer)
-    ProctrackType: LinuxProc
-
-Press the submit button, text will appear in your browser. Copy this text into a new /etc/slurm/slurm.conf file and save.
-
-### 4.3 Distribute the config
-
-add whatever node names you have
+**2.** Run the final script as your **normal user**:
 
 ```bash
-for n in node0 node1 node2 node3; do
-  scp /etc/slurm/slurm.conf "$n":/tmp/slurm.conf
-  ssh -t "$n" "sudo mv /tmp/slurm.conf /etc/slurm/slurm.conf"
-done
+bash ./slurm-setup.sh
 ```
 
-### 4.4 Create required directories
-1. On head
-```bash
-sudo mkdir -p /var/lib/slurm/slurmctld /var/lib/slurm/slurmd /var/log/slurm
-sudo chown -R slurm:slurm /var/lib/slurm /var/log/slurm
-```
-2. On head for workers
-```bash
-for n in node0 node1 node2 node3; do
-  ssh -t "$n" "sudo mkdir -p /var/lib/slurm/slurmctld /var/lib/slurm/slurmd /var/log/slurm && sudo chown -R slurm:slurm /var/lib/slurm /var/log/slurm"
-done
-```
+Enter your password when asked. It checks every node (SSH, `slurmd`, Munge key, clock), copies `slurm.conf` to each worker (checksum verified), creates the Slurm directories, starts `slurmd` on the workers and `slurmctld` on the head, then waits for the nodes to register and explains any node that is not `idle`.
 
-
-## Step 5: Start the Services
-
-**Head:**
-
-```bash
-sudo systemctl enable --now slurmctld
-```
-
-**Workers:**
-
-```bash
-sudo systemctl enable --now slurmd
-```
-
-Check status:
-
-All number of nodes should be shown as idle
+**3.** Check the cluster:
 
 ```bash
 sinfo
-scontrol show nodes
 ```
+
+All nodes should show **idle**. That is it, the cluster is ready.
 
 ---
 
-## Step 6: Test the Cluster
+## Script Reference
 
-### 6.1 Simple command across nodes
+| Script | Run on | Command | Run as | What it does |
+| :--- | :--- | :--- | :--- | :--- |
+| `node-setup.sh` | Each worker | `sudo ./node-setup.sh` | root (re-runs itself with sudo) | Static IP via netplan (with backup and automatic restore on failure), disables cloud-init network config, network tests, hostname, `/etc/hosts`, OpenSSH, `slurmd` + `slurm-client` |
+| `head-setup.sh` | Head | `bash ./head-setup.sh` | normal user | Reachability check, passwordless SSH, Chrony, `/etc/hosts`, `slurm-wlm`, Munge key sync, NFS server and client mounts |
+| `slurm-setup.sh` | Head | `bash ./slurm-setup.sh` | normal user | Pre-flight check per node, `slurm.conf` sync, directories, starts `slurmd` and `slurmctld`, node state report |
 
-N3 for 3 workers, change accordingly
+Notes:
 
-```bash
-srun -N3 hostname
-```
+- The scripts assume a **/24 network**.
+- A node that fails an early check is skipped; the others continue, and a summary is printed at the end.
+- The password you type is kept only in memory during the run and wiped on exit.
+- Backups are kept: `/etc/hosts.bak` and `/etc/netplan/*.bak.<timestamp>`.
 
-### 6.2 Simple job to test
+---
 
-1. Set up the working directory
-```bash
-cd /mnt/shared
-```
-2. Write a Python script that finds primes in a given range (will be called per-node with different ranges)
-```bash
-cat << 'EOF' > prime_worker.py
-import sys
-import time
-
-start_range = int(sys.argv[1])
-end_range = int(sys.argv[2])
-
-t0 = time.time()
-primes = []
-for n in range(start_range, end_range):
-    if n < 2:
-        continue
-    is_prime = True
-    for i in range(2, int(n**0.5) + 1):
-        if n % i == 0:
-            is_prime = False
-            break
-    if is_prime:
-        primes.append(n)
-
-elapsed = time.time() - t0
-print(f"Range [{start_range},{end_range}): found {len(primes)} primes in {elapsed:.2f}s")
-EOF
-```
-3. Write the Slurm batch script that distributes different ranges to each node
+## Verify the Cluster
 
 ```bash
-cat << 'EOF' > prime_job.sh
-#!/bin/bash
-#SBATCH --job-name=prime_find
-#SBATCH --nodes=3
-#SBATCH --ntasks=3
-#SBATCH --ntasks-per-node=1
-#SBATCH --output=/mnt/shared/prime_%j.out
-
-echo "Job started at $(date)"
-echo "Running on nodes: $SLURM_JOB_NODELIST"
-echo "---"
-
-srun --ntasks=3 bash -c '
-  TASK_ID=$SLURM_PROCID
-  RANGE_START=$((TASK_ID * 1000000))
-  RANGE_END=$((RANGE_START + 1000000))
-  echo "Task $TASK_ID on $(hostname): searching [$RANGE_START, $RANGE_END)"
-  python3 /mnt/shared/prime_worker.py $RANGE_START $RANGE_END
-'
-
-echo "---"
-echo "Job finished at $(date)"
-EOF
+sinfo                 # every node should show "idle"
+srun -N8 hostname     # use your worker count; prints one hostname per node
 ```
-4. Submit it
-```bash
-sbatch prime_job.sh
-```
-5. Watch it run(might end before you watch)
-```bash
-watch -n 2 squeue
-```
-### 6.3 Check output
+
+Quick shared-storage check:
 
 ```bash
-ls -la /mnt/shared/prime_*.out
-cat /mnt/shared/prime_<jobid>.out
+touch /mnt/shared/test && ls -l /mnt/shared
 ```
-You should see something like
 
-Job started at Wed Oct  7 07:43:40 UTC 2026
-Running on nodes: node[0-2]
-
-Task 0 on node0: searching [0, 1000000)
-Task 2 on node2: searching [2000000, 3000000)
-Task 1 on node1: searching [1000000, 2000000)
-Range [0,1000000): found 78498 primes in 5.30s
-Range [1000000,2000000): found 70435 primes in 8.95s
-Range [2000000,3000000): found 67883 primes in 11.52s
-
-Job finished at Wed Oct  7 07:43:52 UTC 2026
-
-
+---
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
-|---------|--------------|-----|
-| Node shows `down` or `unk*` | `slurmd` not running, or config mismatch | `sudo systemctl status slurmd`, compare `slurm.conf` on both sides |
-| Node shows `inval` | `CPUs`/`RealMemory` in config exceeds the real hardware | Re-run `slurmd -C` and fix `slurm.conf` |
-| `Authentication failure` / `Invalid credential` | Munge key mismatch or clock skew | Re-copy the key, check `date` on all nodes |
-| `Unable to contact slurm controller` | Firewall, wrong `SlurmctldHost`, or `slurmctld` down | Check `ufw status`, hostname resolution, `journalctl -u slurmctld` |
-| NFS mount hangs | Export or firewall problem, stale handle | `exportfs -v`, `showmount -e head`, remount |
-| Jobs stuck in `PD` | No available resources or node drained | `scontrol show job <id>`, then `scontrol update nodename=nodeX state=resume` |
+| :--- | :--- | :--- |
+| `sudo ./node-setup.sh`: Permission denied | USB file system does not keep the executable flag | Run `sudo bash node-setup.sh` |
+| `node-setup.sh`: no link on the interface | Cable unplugged or switch off | Check the cable and switch power |
+| `node-setup.sh`: IP "already answers ping" | Another machine uses that IP | Pick a free IP |
+| `netplan apply` fails | Missing Open vSwitch package | The script installs `openvswitch-switch` and retries (needs internet) |
+| `head-setup.sh`: SSH port closed or no reply | Node off, wrong IP, or `node-setup.sh` not run | Run `node-setup.sh` on that node, check power and cable |
+| `ssh-copy-id` fails: "IDENTIFICATION HAS CHANGED" | Node was reinstalled | `ssh-keygen -R <node-ip>`, then re-run |
+| `ssh-copy-id` fails: wrong password | Different password or username on the node | Use the same user and password everywhere |
+| "munge rejected head's credential" | Different `munge.key` or clock skew | Re-run `head-setup.sh` (copies head's key); check `chrony` and `date` |
+| NFS mount fails | Export or firewall problem | On head: `sudo exportfs -v`, `sudo ufw status`; on node: `showmount -e head` |
+| Node shows `inval` | `CPUs` / `RealMemory` in `slurm.conf` exceed the hardware | Run `slurmd -C` on the node, fix `slurm.conf`, then `sudo scontrol update nodename=<node> state=resume` |
+| Node shows `down` / `unk*` | `slurmd` cannot reach `slurmctld` | `ping head` from the node, check `ufw status`, `sudo journalctl -u slurmd -n 20` |
+| Job stuck in `PD` | No free resources or node drained | `scontrol show job <id>` |
+| `slurmctld` stops right after start | Error in `slurm.conf`, wrong `SlurmctldHost`, Munge problem | `sudo journalctl -u slurmctld -n 20` |
 
 Useful logs:
 
@@ -496,11 +421,7 @@ sudo tail -f /var/log/slurm/slurmctld.log
 
 ---
 
+## Credits and Contributing
 
-## Contributing
-
-Found a mistake or have a better approach? Open an issue or pull request.
-
-
-
-*Written by [Sahan Prathibha Wijethunga](https://github.com/sahan-maker). Last updated: 2026-10-7.*
+- Original guide and cluster build: **Sahan Prathibha Wijethunga** ([sahanprathibhawije@gmail.com](mailto:sahanprathibhawije@gmail.com))
+- Fork and customise the defaults (user, subnet, packages) for your own infrastructure. Issues and pull requests are welcome.
