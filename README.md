@@ -196,6 +196,18 @@ Do all of the following on **each worker**, then move to the next one.
 
 First set the BIOS options from [BIOS Setup](#bios-setup-boot-menu-and-auto-power-on) (boot menu key and **AC Recovery = Power On**). Then install Ubuntu Server 22.04 on the node. Use the same username and password as on every other machine, and give the node its own name (`node0`, `node1`, ...). Connect the node to the network switch with an Ethernet cable.
 
+In the Ubuntu installer, fill in the profile screen like this:
+
+| Installer field | What to enter |
+| :--- | :--- |
+| Your name | `Elec_Cluster` |
+| Your server's name (the name it uses when it talks to other computers) | `node0` (then `node1`, `node2`, ... one per worker) |
+| Pick a username | `elec_cluster` |
+| Choose a password | Your cluster password (the **same on every machine**) |
+| Confirm your password | The same password again |
+
+The username and password must be identical on the head and on every worker, because the scripts log in to all machines with them. Only the server name changes from node to node.
+
 **2. Plug in the USB drive and find it with `lsblk`**
 
 ```bash
@@ -285,7 +297,15 @@ The reboot is not optional. If the script ends with `A REBOOT IS REQUIRED`, a ke
 
 Once **all** workers are done, go to the head node.
 
-**1.** Install Ubuntu 22.04 Desktop (GUI) on the head. Same username and password as the workers, hostname `head`.
+**1.** Install Ubuntu 22.04 Desktop (GUI) on the head. Fill in the installer like this:
+
+| Installer field | What to enter |
+| :--- | :--- |
+| Your name | `Elec_Cluster` |
+| Your computer's name | `head` (it must be exactly `head`) |
+| Pick a username | `elec_cluster` |
+| Choose a password | The same cluster password as on the workers |
+| Confirm your password | The same password again |
 
 **2.** Plug in the USB drive and mount it the same way:
 
@@ -488,4 +508,5 @@ sudo tail -f /var/log/slurm/slurmctld.log
 ## Credits and Contributing
 
 - Original guide and cluster build: **Sahan Prathibha Wijethunga** ([sahanprathibhawije@gmail.com](mailto:sahanprathibhawije@gmail.com))
+- Scripts and updates: **Meshan Nawod** ([meshannawodme@gmail.com](mailto:meshannawodme@gmail.com))
 - Fork and customise the defaults (user, subnet, packages) for your own infrastructure. Issues and pull requests are welcome.
