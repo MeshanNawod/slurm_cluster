@@ -7,6 +7,8 @@
 # Run AFTER:  head-setup.sh, NFS, munge (key copied to all nodes), Slurm
 #             packages installed, and /etc/slurm/slurm.conf created on head.
 #
+# ONE missing node: answer the 'Set up only ONE node?' question with its index.
+#
 # What it does:
 #   1. checks head (slurmctld installed, munge working) and reads slurm.conf
 #   2. pre-flight check of every node (SSH, slurmd, slurm user, munge key, clock)
@@ -68,9 +70,9 @@ CUSER=${CUSER:-elec_cluster}
 read -r -p "Node name prefix [node]: " PREFIX
 PREFIX=${PREFIX:-node}
 [[ "$PREFIX" =~ ^[a-z][a-z0-9-]*$ ]] || die "Prefix '$PREFIX' is invalid (lowercase letters, digits, '-')."
-read -r -p "First node index [0]: " START
+read -r -p "First node index of the WHOLE cluster [0]: " START
 START=${START:-0}
-read -r -p "Last node index (e.g. 7): " END
+read -r -p "Last node index of the WHOLE cluster (e.g. 14): " END
 read -r -s -p "Password (same on all machines): " PASS
 echo
 
@@ -78,6 +80,16 @@ is_int "$START" || die "First node index '$START' is not a number."
 is_int "$END"   || die "Last node index '$END' is not a number (you must enter one)."
 [ "$END" -ge "$START" ] || die "Last index ($END) is smaller than first index ($START)."
 [ -n "$PASS" ] || die "Password cannot be empty."
+
+read -r -p "Set up only ONE node? Enter its index (Enter = all nodes $START..$END): " ONLY
+if [ -n "$ONLY" ]; then
+  is_int "$ONLY" || die "Node index '$ONLY' is not a number."
+  { [ "$ONLY" -ge "$START" ] && [ "$ONLY" -le "$END" ]; } || die "Node index $ONLY is outside the cluster range $START..$END."
+  SETUP_START=$ONLY; SETUP_END=$ONLY
+  info "Single-node mode: only ${PREFIX}${ONLY} is set up; the other nodes are not touched."
+else
+  SETUP_START=$START; SETUP_END=$END
+fi
 
 # Key-based SSH only (never hangs asking for a password) and quiet host-key notices.
 SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes -o LogLevel=ERROR"
@@ -151,7 +163,7 @@ mapfile -t CONF_NODES < <(
 if [ "${#CONF_NODES[@]}" -eq 0 ]; then
   warn "Could not read any NodeName= entries from $CONF."
 else
-  for i in $(seq "$START" "$END"); do
+  for i in $(seq "$SETUP_START" "$SETUP_END"); do
     N="${PREFIX}${i}"
     printf '%s\n' "${CONF_NODES[@]}" | grep -qx "$N" \
       && ok "$N is defined in slurm.conf" \
@@ -165,7 +177,14 @@ step "2. Pre-flight check of every node"
 check_node() {
   local N=$1 skew
   ssh $SSH_OPTS "$CUSER@$N" true 2>/dev/null \
-    || { err "$N: cannot SSH by key. Powered off? Run head-setup.sh first."; return 1; }
+    || {
+         if ping -c1 -W2 "$N" >/dev/null 2>&1; then
+           err "$N: answers ping but SSH by key fails. Run head-setup.sh first (it copies the SSH key)."
+         else
+           err "$N: no reply at all. Powered off, rebooted, cable/switch problem, or the IP changed? Check it, then run this script again."
+         fi
+         return 1
+       }
   ssh $SSH_OPTS "$CUSER@$N" "test -x /usr/sbin/slurmd" \
     || { err "$N: slurmd not installed. On $N run: sudo apt install -y slurmd slurm-client"; return 1; }
   ssh $SSH_OPTS "$CUSER@$N" "id $SLURM_USER >/dev/null 2>&1" \
@@ -194,7 +213,7 @@ check_node() {
 }
 
 READY=()
-for i in $(seq "$START" "$END"); do
+for i in $(seq "$SETUP_START" "$SETUP_END"); do
   N="${PREFIX}${i}"
   if check_node "$N"; then READY+=("$N"); else FAILED[$N]="pre-flight failed"; fi
 done
@@ -216,6 +235,12 @@ LOCAL_SUM=$(md5sum "$CONF" | cut -d' ' -f1)
 STARTED=()
 for N in "${READY[@]}"; do
   echo; info "--- $N ---"
+
+  # The node may have dropped off the network since the pre-flight check.
+  if ! ssh $SSH_OPTS "$CUSER@$N" true >/dev/null 2>&1; then
+    err "$N: lost connection (SSH timed out). Skipped - check power/cable/IP, then run this script again."
+    FAILED[$N]="lost connection"; continue
+  fi
 
   if ! { scp $SSH_OPTS "$CONF" "$CUSER@$N:/tmp/slurm.conf.new" >/dev/null 2>&1 \
          && try "Install slurm.conf on $N" rsudo "$N" \
@@ -284,6 +309,13 @@ scontrol show nodes | grep -E "NodeName|State|CPUTot"
 echo; step "Result per node"
 for N in "${STARTED[@]}"; do
   st=$(sinfo -h -N -n "$N" -o '%T' 2>/dev/null | head -n1)
+  # Old 'NO NETWORK ADDRESS FOUND' drain flag (set before the name resolved): clear it.
+  if [[ "$st" == drain* ]] && scontrol show node "$N" 2>/dev/null | grep -q 'NO NETWORK ADDRESS'; then
+    info "$N: clearing the old 'NO NETWORK ADDRESS' drain flag (resume) ..."
+    hsudo scontrol update nodename="$N" state=resume >/dev/null 2>&1
+    sleep 3
+    st=$(sinfo -h -N -n "$N" -o '%T' 2>/dev/null | head -n1)
+  fi
   case "$st" in
     idle)
       ok "$N: idle" ;;
@@ -308,7 +340,7 @@ done
 # ---------- Summary ----------
 step "Summary"
 if [ "${#FAILED[@]}" -eq 0 ]; then
-  ok "All nodes done. Every node shows as idle. Test with: srun -N$((END - START + 1)) hostname"
+  ok "All nodes done. Every node shows as idle. Test with: srun -w ${PREFIX}${SETUP_START}$([ "$SETUP_START" -ne "$SETUP_END" ] && echo ",...") hostname"
   exit 0
 fi
 err "Problems with:"

@@ -5,6 +5,7 @@
 # What it does (and tells you about every step while it runs):
 #   1. asks for node name / IP / gateway / DNS and validates them
 #   2. picks the ethernet interface and checks the cable (link) is up
+#   2b. stops automatic upgrades + sleep (they cause dpkg-lock errors / dropped nodes)
 #   3. writes the static IP config (cloud-init off + netplan) with a backup,
 #      validates it, applies it, and restores the backup if something breaks
 #   4. tests the network (gateway, head node, internet, DNS)
@@ -161,6 +162,26 @@ echo "-----------------------------------------"
 read -r -p "Continue? [y/N]: " OK
 [[ "$OK" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }
 
+# ---------- 2b. Stop automatic upgrades and sleep ----------
+# Automatic upgrades hold the dpkg lock ("Could not get lock /var/lib/dpkg/lock-frontend")
+# and break every apt install below and in head-setup.sh. Sleep/suspend can make a
+# node silently drop off the network. Both are switched off on a cluster node.
+step "2b. Stop automatic upgrades and sleep"
+if pgrep -x unattended-upgr >/dev/null; then
+  info "An automatic upgrade is running right now - waiting for it to finish (max 10 minutes) ..."
+fi
+disable_auto_upgrades() {
+  local t
+  for t in $(seq 1 120); do pgrep -x unattended-upgr >/dev/null || break; sleep 5; done
+  systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer || true
+  systemctl mask unattended-upgrades apt-daily.service apt-daily-upgrade.service apt-daily.timer apt-daily-upgrade.timer || true
+  printf 'APT::Periodic::Update-Package-Lists "0";\nAPT::Periodic::Unattended-Upgrade "0";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+}
+try "Disable unattended-upgrades" disable_auto_upgrades \
+  || warn "Could not disable unattended-upgrades. If apt says 'Could not get lock', wait a few minutes and run this script again."
+try "Disable sleep/suspend/hibernate" systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target \
+  || warn "Could not disable sleep. A sleeping node drops off the network."
+
 # ---------- 3. Static IP configuration ----------
 step "3. Static IP configuration"
 
@@ -220,7 +241,7 @@ fi
 
 if ! try "Apply network configuration (netplan apply)" netplan apply; then
   warn "netplan apply failed. The guide says openvswitch-switch can fix this (needs internet)."
-  if try "Install openvswitch-switch" bash -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openvswitch-switch' \
+  if try "Install openvswitch-switch" bash -c 'apt-get -o DPkg::Lock::Timeout=300 update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y openvswitch-switch' \
      && try "Retry netplan apply" netplan apply; then
     :
   else
@@ -295,8 +316,8 @@ if dpkg -s openssh-server >/dev/null 2>&1; then
   ok "openssh-server already installed"
 else
   [ "$HAS_INTERNET" -eq 1 ] || die "openssh-server is not installed and there is no internet. Fix the network first."
-  try "apt update" apt-get update || warn "apt update failed - trying the install anyway"
-  try "Install openssh-server" env DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server \
+  try "apt update" apt-get -o DPkg::Lock::Timeout=300 update || warn "apt update failed - trying the install anyway"
+  try "Install openssh-server" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y openssh-server \
     || die "Could not install openssh-server."
 fi
 try "Enable and start ssh service" systemctl enable --now ssh || die "ssh service did not start. See: systemctl status ssh"
@@ -311,8 +332,8 @@ step "7. Slurm worker packages (slurmd, slurm-client)"
 if dpkg -s slurmd >/dev/null 2>&1 && dpkg -s slurm-client >/dev/null 2>&1; then
   ok "slurmd and slurm-client already installed"
 elif [ "$HAS_INTERNET" -eq 1 ]; then
-  try "apt update" apt-get update || warn "apt update failed - trying the install anyway"
-  if try "Install slurmd slurm-client" env DEBIAN_FRONTEND=noninteractive apt-get install -y slurmd slurm-client; then
+  try "apt update" apt-get -o DPkg::Lock::Timeout=300 update || warn "apt update failed - trying the install anyway"
+  if try "Install slurmd slurm-client" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y slurmd slurm-client; then
     info "This also installed munge with a RANDOM key. head-setup.sh replaces it with head's key later."
   else
     warn "slurmd/slurm-client not installed. Later run: sudo apt install -y slurmd slurm-client"
@@ -328,5 +349,10 @@ if [ "$WARNINGS" -eq 0 ]; then
   ok "Node $NODE_NAME finished with no warnings."
 else
   warn "Node $NODE_NAME finished with $WARNINGS warning(s) - read the [WARN] lines above."
+fi
+# A pending kernel update without a reboot makes the NFS mount fail later with
+# "mount.nfs: an incorrect mount option was specified".
+if [ -f /var/run/reboot-required ] || [ ! -d "/lib/modules/$(uname -r)" ]; then
+  warn "A REBOOT IS REQUIRED (pending kernel update). Reboot before running head-setup.sh, or the NFS mount will fail."
 fi
 echo "Next: reboot, run 'ip a' to confirm the IP stays static, then run head-setup.sh on the head node."
