@@ -17,11 +17,16 @@ Built for a Physics lab computational cluster. Every step prints a clear `[ OK ]
 5. [Cluster Setup Generator (optional)](#cluster-setup-generator-optional)
 6. [Step-by-Step Installation](#step-by-step-installation)
 7. [Adding or Repairing a Single Node](#adding-or-repairing-a-single-node)
-8. [Built-in Error Handling](#built-in-error-handling)
-9. [Script Reference](#script-reference)
-10. [Verify the Cluster](#verify-the-cluster)
-11. [Troubleshooting](#troubleshooting)
-12. [Credits and Contributing](#credits-and-contributing)
+8. [slurm.conf Field Reference](#slurmconf-field-reference)
+9. [Mixed Hardware: Nodes That Are Not Identical](#mixed-hardware-nodes-that-are-not-identical)
+10. [Using the Head Node for Jobs](#using-the-head-node-for-jobs)
+11. [Improving Performance](#improving-performance)
+12. [Further Improvements](#further-improvements)
+13. [Built-in Error Handling](#built-in-error-handling)
+14. [Script Reference](#script-reference)
+15. [Verify the Cluster](#verify-the-cluster)
+16. [Troubleshooting](#troubleshooting)
+17. [Credits and Contributing](#credits-and-contributing)
 
 ---
 
@@ -196,6 +201,18 @@ Do all of the following on **each worker**, then move to the next one.
 
 First set the BIOS options from [BIOS Setup](#bios-setup-boot-menu-and-auto-power-on) (boot menu key and **AC Recovery = Power On**). Then install Ubuntu Server 22.04 on the node. Use the same username and password as on every other machine, and give the node its own name (`node0`, `node1`, ...). Connect the node to the network switch with an Ethernet cable.
 
+In the Ubuntu installer, fill in the profile screen like this:
+
+| Installer field | What to enter |
+| :--- | :--- |
+| Your name | `Elec_Cluster` |
+| Your server's name (the name it uses when it talks to other computers) | `node0` (then `node1`, `node2`, ... one per worker) |
+| Pick a username | `elec_cluster` |
+| Choose a password | Your cluster password (the **same on every machine**) |
+| Confirm your password | The same password again |
+
+The username and password must be identical on the head and on every worker, because the scripts log in to all machines with them. Only the server name changes from node to node.
+
 **2. Plug in the USB drive and find it with `lsblk`**
 
 ```bash
@@ -285,7 +302,15 @@ The reboot is not optional. If the script ends with `A REBOOT IS REQUIRED`, a ke
 
 Once **all** workers are done, go to the head node.
 
-**1.** Install Ubuntu 22.04 Desktop (GUI) on the head. Same username and password as the workers, hostname `head`.
+**1.** Install Ubuntu 22.04 Desktop (GUI) on the head. Fill in the installer like this:
+
+| Installer field | What to enter |
+| :--- | :--- |
+| Your name | `Elec_Cluster` |
+| Your computer's name | `head` (it must be exactly `head`) |
+| Pick a username | `elec_cluster` |
+| Choose a password | The same cluster password as on the workers |
+| Confirm your password | The same password again |
 
 **2.** Plug in the USB drive and mount it the same way:
 
@@ -331,7 +356,7 @@ xdg-open /usr/share/doc/slurmctld/slurm-wlm-configurator.html
 | RealMemory | A little **below** the smallest value `slurmd -C` reports on any node |
 | ProctrackType | `LinuxProc` |
 
-If one node has different hardware (for example less RAM), give it its own `NodeName=` line. Otherwise Slurm marks it `inval`.
+If one node has different hardware (for example less RAM), give it its own `NodeName=` line. Otherwise Slurm marks it `inval`. See [Mixed Hardware](#mixed-hardware-nodes-that-are-not-identical) and the full [field reference](#slurmconf-field-reference).
 
 **4.** Click **Submit** and copy the text that appears.
 
@@ -389,6 +414,135 @@ What single-node mode does and does not do:
 - A drained node with the old `NO NETWORK ADDRESS FOUND` flag is resumed automatically by `slurm-setup.sh`.
 
 For nodes that were set up with an **older** `node-setup.sh` (one without step 2b), run `node-setup-in-head.sh` instead of `head-setup.sh`. It does everything `head-setup.sh` does and first turns off automatic upgrades on the head and on every selected node.
+
+---
+
+## slurm.conf Field Reference
+
+What each field of the Slurm configurator means, and a sensible value for a small lab cluster. Open the configurator that matches your installed Slurm version (on the head: `/usr/share/doc/slurmctld/slurm-wlm-configurator.html`). The online tool at <https://slurm.schedmd.com/configurator.html> supports only one Slurm version, so it may write options that an older package does not understand. Prefer the local file.
+
+| Field | What it does | Suggested value |
+| :--- | :--- | :--- |
+| ClusterName | Name of the cluster | Any name, e.g. `physics_lab` |
+| SlurmctldHost | Machine that runs the scheduler | `head` |
+| BackupController | Spare scheduler machine | Leave empty |
+| NodeName | The worker nodes, as a range | `node[0-14]` (use one line per hardware type, see [Mixed Hardware](#mixed-hardware-nodes-that-are-not-identical)) |
+| NodeAddr | IP address if the name does not resolve | Leave empty (`/etc/hosts` handles it) |
+| PartitionName / MaxTime | The queue name and the longest allowed job | `main`, `INFINITE` |
+| CPUs, Sockets, CoresPerSocket, ThreadsPerCore | CPU layout of a node | Copy from `slurmd -C`; keep the values consistent with each other |
+| RealMemory | RAM Slurm may hand out (MB) | A little **below** the `slurmd -C` value |
+| SlurmUser | Account the scheduler runs as | `slurm` |
+| SlurmctldPort / SlurmdPort | Network ports | Leave empty (defaults) |
+| StateSaveLocation | Where the scheduler saves its state | `/var/lib/slurm/slurmctld` |
+| SlurmdSpoolDir | Where each node saves its state | `/var/lib/slurm/slurmd` |
+| ReturnToService | When a downed node comes back | `2`, so nodes rejoin by themselves after a power cut |
+| SchedulerType | Job ordering | `Backfill` (small jobs fill gaps without delaying big ones) |
+| SwitchType | Special network hardware | None |
+| MpiDefault | Default MPI start method | None (PMIx only if your MPI supports it) |
+| ProctrackType | How Slurm tracks a job's processes | `LinuxProc` (see the note below) |
+| SelectType | How resources are handed out | `cons_tres`: individual CPUs and memory, so jobs can share a node. `Linear` gives whole nodes only |
+| TaskPlugin | Pins tasks to CPUs | `Affinity` |
+| Prolog / Epilog, SrunProlog / SrunEpilog, TaskProlog / TaskEpilog | Scripts run before and after jobs | Leave empty |
+| SlurmctldDebug / SlurmdDebug | How detailed the logs are | `info` |
+| SlurmctldLogFile / SlurmdLogFile | Log file paths | `/var/log/slurm/slurmctld.log` and `/var/log/slurm/slurmd.log` |
+| JobCompType, JobAcctGatherType, AccountingStorageType | Job history and usage records | None for now (see [Further Improvements](#further-improvements)) |
+| SlurmctldPidFile / SlurmdPidFile | Where each daemon writes its process ID | `/var/run/slurmctld.pid` and `/var/run/slurmd.pid` |
+| SlurmctldTimeout / SlurmdTimeout | Seconds before a controller or node counts as dead | `300` |
+| InactiveLimit | Seconds before an unresponsive `srun` is cut off | `0` (no limit) |
+| MinJobAge | Seconds a finished job stays visible in `squeue` | `300` |
+| KillWait | Seconds a job gets to stop after its time limit | `30` |
+| WaitTime | Seconds the rest of a step may keep running after its first task ends | `0` |
+
+Notes:
+
+- The directory and log paths above are the defaults `slurm-setup.sh` uses. If you change them in `slurm.conf`, the script reads the new paths from the file.
+- To count memory when placing jobs, add `SelectTypeParameters=CR_Core_Memory` to `slurm.conf` by hand.
+- `ProctrackType=Cgroup` enforces CPU and memory limits properly, but older Slurm packages may not work with the cgroup version Ubuntu 22.04 uses. `LinuxProc` is the safe choice.
+- `slurm.conf` must be identical on every node. After any edit, run `slurm-setup.sh` for the whole cluster.
+
+---
+
+## Mixed Hardware: Nodes That Are Not Identical
+
+Slurm handles different machines directly. Give each hardware type its own `NodeName=` line instead of one line for all nodes, otherwise a weaker node is marked `inval`.
+
+Collect the real specs from every node at once. This prints a ready-to-paste line per node, with `RealMemory` set to 95% of the real value:
+
+```bash
+for n in node{0..14}; do
+  ssh $n slurmd -C | head -n1 | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^RealMemory=/) { split($i,a,"="); $i="RealMemory=" int(a[2]*0.95) } print $0 " State=UNKNOWN" }'
+done
+```
+
+Paste the lines into `/etc/slurm/slurm.conf`, keep one partition line, then run `slurm-setup.sh` for the whole cluster:
+
+```
+PartitionName=main Nodes=node[0-14] Default=YES MaxTime=INFINITE State=UP
+```
+
+Useful options for mixed hardware:
+
+| Option | How to use it |
+| :--- | :--- |
+| `Weight` | Add `Weight=10` to slow nodes and `Weight=1` to fast ones. Slurm fills the lowest weight first |
+| `Feature` | Add `Feature=i5,ram8` to a node; users pick with `sbatch --constraint=ram8` |
+| Separate partitions | For example `fast` and `slow` queues. Put similar nodes together for MPI jobs, because a tightly coupled job runs at the speed of its slowest node |
+| Resource requests | Tell users to request `--cpus-per-task` and `--mem` rather than assume every node is the same |
+
+---
+
+## Using the Head Node for Jobs
+
+By default the head only schedules. To also use its CPUs for jobs:
+
+1. On the head, run `slurmd -C` and add a `NodeName=head ...` line to `slurm.conf`. Add `head` to the partition's node list, for example `Nodes=node[0-14],head`.
+2. Make sure `slurmd` is installed on the head (`sudo apt install -y slurmd`; `slurm-wlm` already includes it).
+3. Copy `slurm.conf` to every node (`slurm-setup.sh` for the whole cluster does this for the workers; copy it manually if you use the head only) and run on the head:
+
+   ```bash
+   sudo systemctl enable --now slurmd
+   sudo systemctl restart slurmctld
+   ```
+
+   A new node needs a controller restart, not just a reload.
+4. Keep the head responsive. It also runs the scheduler, the NFS server and the desktop. Give it `Weight=100` so workers are used first, and set `CPUs` a little below the real count so a few cores stay free.
+
+Note: `slurm-setup.sh` only handles worker names (`node0`, `node1`, ...), so the head steps above are manual.
+
+---
+
+## Improving Performance
+
+A cluster of ordinary desktop CPUs is often slower than one GPU for GPU-friendly work (matrix maths, deep learning, many simulations), because a GPU has thousands of cores and much more memory bandwidth. A CPU cluster can still win in some cases, and there is a lot you can do to improve it:
+
+| Idea | Details |
+| :--- | :--- |
+| Run many independent jobs | Parameter sweeps and Monte Carlo runs scale almost perfectly with job arrays: `sbatch --array=0-999 job.sh` |
+| Measure scaling | Run the same job on 1, 2, 4, 8 and 16 nodes. If it stops speeding up early, the network or the code is the limit |
+| Check the network | Standard Gigabit Ethernet is slow for tightly coupled MPI. Test with `iperf3`; faster NICs and a faster switch only help MPI-bound jobs |
+| Use every core on a node | MPI between nodes plus OpenMP inside a node (`--cpus-per-task=4`) |
+| Compile for the CPU | `-O3 -march=native`, optimized math libraries (OpenBLAS or MKL), and no Python loops in the hot code |
+| Keep scratch local | Write temporary data to `/tmp` on the node and copy results to `/mnt/shared` at the end. NFS is slow for heavy I/O |
+| Add the GPU to the cluster | Put a GPU in one node and declare it (`GresTypes=gpu`, `gres.conf`, `Gres=gpu:1`), so users request it with `--gres=gpu:1`. Use the GPU for the heavy part and the CPUs for the rest |
+| Check precision | Consumer GPUs are weak at double precision (FP64). A CPU cluster can be competitive there |
+
+---
+
+## Further Improvements
+
+Ideas for extending the cluster:
+
+| Area | What to add |
+| :--- | :--- |
+| Accounting | `slurmdbd` + MariaDB for usage per user and fair-share scheduling |
+| Configuration | Configless Slurm: nodes fetch `slurm.conf` from the head, so it no longer has to be copied to every node |
+| Software | Environment modules (Lmod), Conda or Spack on `/mnt/shared`, containers with Apptainer |
+| Users | NFS `/home` plus LDAP, so every user has the same files and UID on every node |
+| Monitoring | Prometheus, node_exporter and Grafana for load, temperature and node state |
+| Automation | Ansible instead of per-node scripts, and network install (PXE) for new nodes |
+| Power saving | Slurm can switch idle nodes off and wake them with Wake-on-LAN |
+| Safety | A UPS with graceful shutdown, `ufw` firewall rules, SSH hardening |
+| Convenience | A web portal (Open OnDemand or JupyterHub), email on job completion, job templates |
 
 ---
 
@@ -488,4 +642,5 @@ sudo tail -f /var/log/slurm/slurmctld.log
 ## Credits and Contributing
 
 - Original guide and cluster build: **Sahan Prathibha Wijethunga** ([sahanprathibhawije@gmail.com](mailto:sahanprathibhawije@gmail.com))
+- Scripts and updates: **Meshan Nawod** ([meshannawodme@gmail.com](mailto:meshannawodme@gmail.com))
 - Fork and customise the defaults (user, subnet, packages) for your own infrastructure. Issues and pull requests are welcome.
